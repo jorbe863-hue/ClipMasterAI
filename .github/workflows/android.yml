@@ -1,47 +1,40 @@
 
-nombre: Construir ClipMaster AI APK
+name: Build ClipMaster AI APK
 
-en:
-   flujo de trabajo_despacho  :
- Empuje :
-  ramas : ["principal"]
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
 
-trabajos:
-    construir   :
- Run-on : UBuntu-última
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-  pasos :
- - nombre:   SAlida                          usos    
-Onfigurar Java                        : A.... Lidacciones/checkout@v4
+    steps:
+ -  nombre: Salida
+   usos : acciones/checkout@v4
 
- - nombre: Cusos de la configuración de Java  
-                                    usos                                  : a... ... acción .../setup-java@v4 con 
- con :
- distribución : Temurin
- versión java : "17"
-
- - -                                                nombre: 
-C               : : 
+ - nombre: COnfigurar Java
+    usos  : acciones/setup-java@v4
  Con :
-             Grade-Versión            : "8.9"
+  distribución : Temurin
+  versión java : "17"
 
- - Compruebe Android SDK: Compruebe Android SDK
- Correr : |
-             echo "ANDROID_HOME=$ANDROID_HOME"   
-     prueba -d  "$ANDROID_HOME/herramientas de plataforma" "$ANDROID_HOME/herramientas de plataforma"    
+ - nombre: Configurar Gradle
+  usos : gradle/actions/setup-gradle@v4
+ Con :
+  Grade-Versión : "8.9"
 
- - nombre: Construir depuración APK nombre: Construir depuración APK
- correr : | : |
-  si [ -f ./gradlew ]; entonces  
- chmod +x ./gradlew 
-    gradle - sembrador de no-demonio Depuración    
- más 
-  gradle - sembrador de no-demonio Depuración  
- fi 
+ - nombre: Configurar Android SDK
+  usos : yroid-actions/setup-android@v3
 
-Cargar APKnombrenombre  :   Cargar APK Argar APK arga APK argarAPK APK argar. : Cargar APK         
-acciones/carga-artefact@v4C  : u
-           utiliza                    uu tiliza cciones/carga-artefact@v4  cciones/carga-artefact@v4     tiliza cciones/carga-artefact@v4  cciones/carga-artefact@v4      tiliza cciones/carga-artefact@v4  cciones/carga-artefact@v4     tiliza cciones/carga-artefact@v4  cciones/carga-artefact@v4         tiliza cciones/carga-artefact@v4  cciones/carga-artefact@v4     tiliza cciones/carga-artefact@v4  cciones/carga-artefact@v4      tiliza cciones/carga-artefact@v4  cciones/carga-artefact@v4     tiliza cciones/carga        : 
-:: CClipMasterAI-depuración-apklipMasterAI-depuración-apk
-  nombre: ClipMasterAI-depuración-apk lipMasterAI-depuración-apk lipMasterAI-depuración-apk lipMasterAI-depuración-apk : nombre nombre  nombrelipMasterAI-depuración-apkpp/build/outputs/apk/debug/app-debug.apk
-ombre nombre  nombrelipMasterAI-depuración-apkpp/build/outputs/apk/debug/app-debug.apk: error
+ - nombre: Construir depuración APK
+ Correr : gradle ensamblarDepuración
+
+ - nombre: Cargar APK
+  usos : acciones/carga-artefact@v4
+ Con :
+  nombre : ClipMasterAI-depuración-apk
+  camino : App/build/outputs/apk/debug/app-debug.apk
+ if-no-files-encontrado : error
