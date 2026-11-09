@@ -1,0 +1,36 @@
+openapi: 3.1.0
+info:
+  title: ClipMaster AI API
+  version: 0.1.0
+paths:
+  /v1/jobs:
+    post:
+      summary: Create a clip generation job for authorized media
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, url, mode, duration_seconds]
+              properties:
+                source: { type: string, enum: [youtube, kick] }
+                url: { type: string, format: uri }
+                mode: { type: string, enum: [viral, intelligent, combined] }
+                duration_seconds: { type: integer, enum: [15, 30, 60, 90] }
+                manual_start: { type: string }
+                manual_end: { type: string }
+                captions: { type: boolean, default: true }
+                aspect_ratio: { type: string, enum: ["9:16"], default: "9:16" }
+      responses:
+        "202": { description: Job accepted }
+  /v1/jobs/{job_id}:
+    get:
+      summary: Get job progress
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Job status }
