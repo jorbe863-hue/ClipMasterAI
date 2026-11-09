@@ -1,9 +1,17 @@
 
 package com.clipmasterai
 
+import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -13,27 +21,120 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
+import java.io.File
+import java.io.IOException
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            ClipMasterApp()
-        }
+        setContent { ClipMasterApp() }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+private fun parseTime(value: String): Long? {
+    val parts = value.split(":")
+    if (parts.size != 3) return null
+
+    val hours = parts[0].toLongOrNull() ?: return null
+    val minutes = parts[1].toLongOrNull() ?: return null
+    val seconds = parts[2].toLongOrNull() ?: return null
+
+    if (hours < 0 || minutes !in 0..59 || seconds !in 0..59) {
+        return null
+    }
+
+    return ((hours * 3600 + minutes * 60 + seconds) * 1000)
+}
+
+private fun getVideoDuration(context: Context, uri: Uri): Long {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, uri)
+        retriever.extractMetadata(
+            MediaMetadataRetriever.METADATA_KEY_DURATION
+        )?.toLongOrNull() ?: 0L
+    } finally {
+        retriever.release()
+    }
+}
+
+private fun saveVideoToDevice(
+    context: Context,
+    source: File
+): String {
+    val name = "ClipMaster_${System.currentTimeMillis()}.mp4"
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, name)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(
+                MediaStore.Video.Media.RELATIVE_PATH,
+                "${Environment.DIRECTORY_MOVIES}/ClipMasterAI"
+            )
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+
+        val resolver = context.contentResolver
+        val uri = resolver.insert(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            values
+        ) ?: throw IOException("No se pudo crear el archivo en la galería.")
+
+        try {
+            val output = resolver.openOutputStream(uri)
+                ?: throw IOException("No se pudo abrir el archivo de destino.")
+
+            output.use { stream ->
+                source.inputStream().use { input ->
+                    input.copyTo(stream)
+                }
+            }
+
+            val completedValues = ContentValues().apply {
+                put(MediaStore.Video.Media.IS_PENDING, 0)
+            }
+            resolver.update(uri, completedValues, null, null)
+
+            return "Guardado en Películas/ClipMasterAI"
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            throw e
+        }
+    }
+
+    val directory = File(
+        context.getExternalFilesDir(Environment.DIRECTORY_MOVIES),
+        "ClipMasterAI"
+    )
+
+    if (!directory.exists() && !directory.mkdirs()) {
+        throw IOException("No se pudo crear la carpeta de videos.")
+    }
+
+    val destination = File(directory, name)
+    source.copyTo(destination, overwrite = true)
+
+    return destination.absolutePath
+}
+
+@OptIn(UnstableApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ClipMasterApp() {
     val context = LocalContext.current
 
     var url by remember { mutableStateOf("") }
     var mode by remember { mutableStateOf("Automático") }
-    var aiMode by remember { mutableStateOf("Combinado") }
     var sourceMode by remember { mutableStateOf("Video grabado") }
     var duration by remember { mutableStateOf("30 segundos") }
     var start by remember { mutableStateOf("00:00:00") }
@@ -43,14 +144,14 @@ fun ClipMasterApp() {
     var prepareTikTok by remember { mutableStateOf(true) }
     var prepareFacebook by remember { mutableStateOf(true) }
     var status by remember {
-        mutableStateOf("Selecciona un video o pega un enlace para comenzar.")
+        mutableStateOf("Selecciona un video para comenzar.")
     }
-    var selectedClip by remember { mutableStateOf("Clip destacado 1") }
-    var showClipDetails by remember { mutableStateOf(false) }
     var selectedVideoUri by remember { mutableStateOf<Uri?>(null) }
+    var processing by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(false) }
 
     val videoPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
+        ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
             try {
@@ -58,12 +159,127 @@ fun ClipMasterApp() {
                     uri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
-                selectedVideoUri = uri
-                status = "Video seleccionado correctamente."
-            } catch (e: Exception) {
-                selectedVideoUri = uri
-                status = "Video seleccionado. Acceso disponible durante esta sesión."
+            } catch (_: Exception) {
+                // El selector puede proporcionar acceso temporal.
             }
+
+            selectedVideoUri = uri
+            status = "Video seleccionado correctamente."
+        }
+    }
+
+    fun generateClip() {
+        val uri = selectedVideoUri
+
+        if (uri == null) {
+            status = "Selecciona primero un video del teléfono."
+            return
+        }
+
+        if (processing) return
+
+        try {
+            val videoDuration = getVideoDuration(context, uri)
+
+            if (videoDuration <= 0L) {
+                status = "No se pudo leer la duración del video."
+                return
+            }
+
+            val startMs: Long
+            val endMs: Long
+
+            if (mode == "Manual") {
+                startMs = parseTime(start) ?: run {
+                    status = "Formato de inicio incorrecto. Usa HH:MM:SS."
+                    return
+                }
+
+                endMs = parseTime(end) ?: run {
+                    status = "Formato de final incorrecto. Usa HH:MM:SS."
+                    return
+                }
+            } else {
+                startMs = 0L
+                val seconds = duration.substringBefore(" ").toLongOrNull() ?: 30L
+                endMs = seconds * 1000L
+            }
+
+            if (startMs >= endMs) {
+                status = "El inicio debe ser anterior al final."
+                return
+            }
+
+            if (endMs > videoDuration) {
+                status = "El final supera la duración del video."
+                return
+            }
+
+            val mediaItem = MediaItem.Builder()
+                .setUri(uri)
+                .setClippingConfiguration(
+                    MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionMs(startMs)
+                        .setEndPositionMs(endMs)
+                        .build()
+                )
+                .build()
+
+            val editedItem = EditedMediaItem.Builder(mediaItem).build()
+
+            val outputFile = File(
+                context.cacheDir,
+                "clipmaster_${System.currentTimeMillis()}.mp4"
+            )
+
+            val transformer = Transformer.Builder(context)
+                .addListener(object : Transformer.Listener {
+
+                    override fun onCompleted(
+                        composition: androidx.media3.transformer.Composition,
+                        exportResult: ExportResult
+                    ) {
+                        Thread {
+                            val result = runCatching {
+                                saveVideoToDevice(context, outputFile)
+                            }
+
+                            Handler(Looper.getMainLooper()).post {
+                                processing = false
+
+                                status = result.fold(
+                                    onSuccess = {
+                                        outputFile.delete()
+                                        "¡Clip creado correctamente! $it"
+                                    },
+                                    onFailure = {
+                                        "El video se procesó, pero no se pudo guardar: ${it.message}"
+                                    }
+                                )
+                            }
+                        }.start()
+                    }
+
+                    override fun onError(
+                        composition: androidx.media3.transformer.Composition,
+                        exportResult: ExportResult,
+                        exportException: ExportException
+                    ) {
+                        processing = false
+                        outputFile.delete()
+                        status = "Error procesando el video: ${exportException.message}"
+                    }
+                })
+                .build()
+
+            processing = true
+            status = "Procesando video. Espera a que termine..."
+
+            transformer.start(editedItem, outputFile.absolutePath)
+
+        } catch (e: Exception) {
+            processing = false
+            status = "No se pudo iniciar el procesamiento: ${e.message}"
         }
     }
 
@@ -82,12 +298,7 @@ fun ClipMasterApp() {
                     style = MaterialTheme.typography.headlineMedium
                 )
 
-                Text("Convierte videos y lives en clips verticales.")
-
-                Text(
-                    "VIDEO DE TU TELÉFONO",
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Text("Convierte videos en clips cortos.")
 
                 OutlinedButton(
                     onClick = {
@@ -98,78 +309,42 @@ fun ClipMasterApp() {
                     Text("📁 Seleccionar video del teléfono")
                 }
 
-                selectedVideoUri?.let { uri ->
-                    Text(
-                        "Video seleccionado: ${uri.lastPathSegment ?: "Video"}",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-
-                    TextButton(
-                        onClick = {
-                            selectedVideoUri = null
-                            status = "Video deseleccionado."
-                        }
-                    ) {
-                        Text("Quitar video")
-                    }
-                }
+                Text(
+                    selectedVideoUri?.lastPathSegment
+                        ?: "Ningún video seleccionado",
+                    style = MaterialTheme.typography.bodySmall
+                )
 
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Enlace de YouTube o Kick") },
-                    placeholder = { Text("Pega aquí el enlace...") },
                     singleLine = true
                 )
 
-                Text(
-                    "Tipo de fuente",
-                    style = MaterialTheme.typography.titleMedium
-                )
-
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    listOf(
-                        "Video grabado",
-                        "Live terminado",
-                        "Live en tiempo real"
-                    ).forEach { option ->
-                        Row(
-                            verticalAlignment =
-                                androidx.compose.ui.Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = sourceMode == option,
-                                onClick = { sourceMode = option }
-                            )
-                            Text(option)
-                        }
+                Text("Tipo de fuente")
+                listOf(
+                    "Video grabado",
+                    "Live terminado",
+                    "Live en tiempo real"
+                ).forEach { option ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = sourceMode == option,
+                            onClick = { sourceMode = option }
+                        )
+                        Text(option)
                     }
                 }
 
-                if (sourceMode == "Live en tiempo real") {
-                    Text(
-                        "El modo LIVE necesita acceso autorizado a una señal o fuente compatible. No todas las transmisiones permiten captura en tiempo real.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-
-                Text(
-                    "Modo de creación",
-                    style = MaterialTheme.typography.titleMedium
-                )
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                Text("Modo de creación")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = mode == "Automático",
                         onClick = { mode = "Automático" },
-                        label = { Text("Automático IA") }
+                        label = { Text("Automático") }
                     )
-
                     FilterChip(
                         selected = mode == "Manual",
                         onClick = { mode = "Manual" },
@@ -179,38 +354,10 @@ fun ClipMasterApp() {
 
                 if (mode == "Automático") {
                     Text(
-                        "Tipo de análisis IA",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-
-                    listOf("Viral", "Inteligente", "Combinado").forEach {
-                        option ->
-                        FilterChip(
-                            selected = aiMode == option,
-                            onClick = { aiMode = option },
-                            label = { Text(option) }
-                        )
-                    }
-
-                    Text(
-                        when (aiMode) {
-                            "Viral" ->
-                                "Busca reacciones, humor, sorpresas y momentos intensos."
-                            "Inteligente" ->
-                                "Analiza conversaciones, historias, consejos y contenido útil."
-                            else ->
-                                "Combina detección viral y análisis inteligente."
-                        },
-                        style = MaterialTheme.typography.bodySmall
+                        "Recorte provisional: primeros segundos del video. "
+                            + "La detección inteligente llegará después."
                     )
                 }
-
-                Text(
-                    "Duración objetivo",
-                    style = MaterialTheme.typography.titleMedium
-                )
-
-                var expanded by remember { mutableStateOf(false) }
 
                 ExposedDropdownMenuBox(
                     expanded = expanded,
@@ -223,7 +370,7 @@ fun ClipMasterApp() {
                         modifier = Modifier
                             .menuAnchor()
                             .fillMaxWidth(),
-                        label = { Text("Duración") }
+                        label = { Text("Duración del clip") }
                     )
 
                     ExposedDropdownMenu(
@@ -248,79 +395,58 @@ fun ClipMasterApp() {
                 }
 
                 if (mode == "Manual") {
-                    Text(
-                        "Fragmento que quieres cortar",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-
                     OutlinedTextField(
                         value = start,
                         onValueChange = { start = it },
-                        label = { Text("Inicio (HH:MM:SS)") },
+                        label = { Text("Inicio HH:MM:SS") },
                         modifier = Modifier.fillMaxWidth()
                     )
 
                     OutlinedTextField(
                         value = end,
                         onValueChange = { end = it },
-                        label = { Text("Fin (HH:MM:SS)") },
+                        label = { Text("Final HH:MM:SS") },
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
 
-                Text(
-                    "Edición y publicación",
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Text("Opciones de edición")
 
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(captions, { captions = it })
-                    Text("Subtítulos automáticos")
+                    Text("Subtítulos automáticos (pendiente)")
                 }
 
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(vertical, { vertical = it })
-                    Text("Formato vertical 9:16")
+                    Text("Formato vertical 9:16 (pendiente)")
                 }
 
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(prepareTikTok, { prepareTikTok = it })
                     Text("Preparar para TikTok")
                 }
 
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(prepareFacebook, { prepareFacebook = it })
                     Text("Preparar para Facebook Reels")
                 }
 
                 Button(
-                    onClick = {
-                        val validLink =
-                            url.contains("youtube.com") ||
-                            url.contains("youtu.be") ||
-                            url.contains("kick.com")
-
-                        status = when {
-                            url.isBlank() && selectedVideoUri == null ->
-                                "Selecciona un video o pega un enlace."
-
-                            url.isNotBlank() &&
-                                selectedVideoUri == null &&
-                                !validLink ->
-                                "El enlace debe ser de YouTube o Kick."
-
-                            else ->
-                                "Entrada preparada correctamente. Fuente: ${
-                                    if (selectedVideoUri != null)
-                                        "Video del teléfono"
-                                    else
-                                        "Enlace externo"
-                                }. Modo: $mode. Duración: $duration. Falta conectar el procesador y el motor IA."
-                        }
-                    },
+                    onClick = { generateClip() },
+                    enabled = !processing,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("✂ GENERAR CLIPS")
+                    Text(
+                        if (processing) "PROCESANDO..."
+                        else "✂ GENERAR CLIP"
+                    )
+                }
+
+                if (processing) {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
 
                 Card(Modifier.fillMaxWidth()) {
@@ -329,124 +455,16 @@ fun ClipMasterApp() {
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            "Estado",
+                            "Estado del procesamiento",
                             style = MaterialTheme.typography.titleMedium
                         )
                         Text(status)
-                        Text(
-                            "El procesamiento real se conectará en la siguiente etapa."
-                        )
                     }
                 }
 
                 Text(
-                    "Panel de clips",
-                    style = MaterialTheme.typography.titleMedium
-                )
-
-                Card(Modifier.fillMaxWidth()) {
-                    Column(
-                        Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                "Bandeja de clips",
-                                style = MaterialTheme.typography.titleSmall
-                            )
-
-                            AssistChip(
-                                onClick = {
-                                    showClipDetails = !showClipDetails
-                                },
-                                label = {
-                                    Text(
-                                        if (showClipDetails) "Ocultar"
-                                        else "Ver ejemplo"
-                                    )
-                                }
-                            )
-                        }
-
-                        if (showClipDetails) {
-                            listOf(
-                                "Clip destacado 1",
-                                "Reacción emocionante",
-                                "Momento divertido"
-                            ).forEachIndexed { index, clip ->
-                                Row(
-                                    verticalAlignment =
-                                        androidx.compose.ui.Alignment.CenterVertically
-                                ) {
-                                    RadioButton(
-                                        selected = selectedClip == clip,
-                                        onClick = { selectedClip = clip }
-                                    )
-
-                                    Column(Modifier.weight(1f)) {
-                                        Text(clip)
-                                        Text(
-                                            "Ejemplo demostrativo · ${15 + index * 10} s",
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-
-                                    TextButton(
-                                        onClick = {
-                                            status = "$clip seleccionado. Todavía no es un clip real."
-                                        }
-                                    ) {
-                                        Text("Elegir")
-                                    }
-                                }
-                            }
-                        }
-
-                        Text(
-                            "Los clips de ejemplo no son videos reales generados.",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-
-                Text(
-                    "Destinos: " + listOfNotNull(
-                        if (prepareTikTok) "TikTok" else null,
-                        if (prepareFacebook) "Facebook Reels" else null
-                    ).ifEmpty { listOf("Ninguno") }.joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall
-                )
-
-                Text(
-                    "Compartir",
-                    style = MaterialTheme.typography.titleMedium
-                )
-
-                OutlinedButton(
-                    onClick = {
-                        val send = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(
-                                Intent.EXTRA_TEXT,
-                                url.ifBlank { selectedVideoUri?.toString().orEmpty() }
-                            )
-                        }
-
-                        context.startActivity(
-                            Intent.createChooser(send, "Compartir enlace")
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Compartir enlace")
-                }
-
-                Text(
-                    "La publicación directa en TikTok y Facebook requiere sus APIs y autorización. Esta versión permite seleccionar videos, pero todavía no los procesa.",
-                    style = MaterialTheme.typography.bodySmall
+                    "Los enlaces de YouTube y Kick todavía no se descargan ni procesan. "
+                        + "Selecciona un archivo de video local para probar el recorte."
                 )
             }
         }
