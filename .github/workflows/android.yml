@@ -12,29 +12,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
- -  nombre: Salida
-   usos : acciones/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
- - nombre: COnfigurar Java
-    usos  : acciones/setup-java@v4
- Con :
-  distribución : Temurin
-  versión java : "17"
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
- - nombre: Configurar Gradle
-  usos : gradle/actions/setup-gradle@v4
- Con :
-  Grade-Versión : "8.9"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
 
- - nombre: Configurar Android SDK
-  usos : yroid-actions/setup-android@v3
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
- - nombre: Construir depuración APK
- Correr : gradle ensamblarDepuración
+      - name: Build debug APK
+        run: gradle assembleDebug
 
- - nombre: Cargar APK
-  usos : acciones/carga-artefact@v4
- Con :
-  nombre : ClipMasterAI-depuración-apk
-  camino : App/build/outputs/apk/debug/app-debug.apk
- if-no-files-encontrado : error
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipMasterAI-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
